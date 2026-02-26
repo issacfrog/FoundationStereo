@@ -59,7 +59,10 @@ if __name__=="__main__":
 
   model = FoundationStereo(args)
 
-  ckpt = torch.load(ckpt_dir)
+  # [Modified by Assistant] PyTorch>=2.6 defaults torch.load(weights_only=True),
+  # but this checkpoint stores extra Python objects (e.g., numpy scalar metadata).
+  # Load with weights_only=False for trusted local checkpoints.
+  ckpt = torch.load(ckpt_dir, map_location='cpu', weights_only=False)
   logging.info(f"ckpt global_step:{ckpt['global_step']}, epoch:{ckpt['epoch']}")
   model.load_state_dict(ckpt['model'])
 

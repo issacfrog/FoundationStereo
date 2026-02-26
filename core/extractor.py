@@ -325,7 +325,9 @@ class Feature(nn.Module):
     def __init__(self, args):
         super(Feature, self).__init__()
         self.args = args
-        model = timm.create_model('edgenext_small', pretrained=True, features_only=False)
+        # [Modified by Assistant] Disable online pretrained download from Hugging Face.
+        # We rely on the project checkpoint loaded in run_demo.py, so offline inference can run.
+        model = timm.create_model('edgenext_small', pretrained=False, features_only=False)
         self.stem = model.stem
         self.stages = model.stages
         chans = [48, 96, 160, 304]
