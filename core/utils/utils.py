@@ -40,24 +40,42 @@ class InputPadder:
         c = [self._pad[2], ht-self._pad[3], self._pad[0], wd-self._pad[1]]
         return x[..., c[0]:c[1], c[2]:c[3]]
 
-
+# 双线性插值采样函数
 def bilinear_sampler(img, coords, mode='bilinear', mask=False, low_memory=False):
     """ Wrapper for grid_sample, uses pixel coordinates """
     H, W = img.shape[-2:]
     xgrid, ygrid = coords.split([1,1], dim=-1)
-    xgrid = 2*xgrid/(W-1) - 1   # Normalize to [-1,1]
+    xgrid = 2*xgrid/(W-1) - 1   # Normalize to [-1,1] 实际上是进行了坐标归一化
     assert torch.unique(ygrid).numel() == 1 and H == 1 # This is a stereo problem
+    # 这里的 H == 1 表明该函数在这里可能被用于处理单行特征（或者是经过某种池化后的相关性条带）。
+    # 它通过断言确保 $y$ 坐标是统一的，即只在 $x$ 方向进行搜索/重采样。
     grid = torch.cat([xgrid, ygrid], dim=-1).to(img.dtype)
     with cudnn.flags(enabled=False):
-        img = F.grid_sample(img.contiguous(), grid.contiguous(), align_corners=True)
+        img = F.grid_sample(img.contiguous(), grid.contiguous(), align_corners=True) # 执行双线性插值
     if mask:
-        mask = (xgrid > -1) & (ygrid > -1) & (xgrid < 1) & (ygrid < 1)
+        mask = (xgrid > -1) & (ygrid > -1) & (xgrid < 1) & (ygrid < 1) # 掩码清除掉匹配不上的点
         return img, mask.float()
     return img
 
-
+# 创建一个基础坐标网格
+# 输入是batch大小, ht, wd，图像的高度和宽度
 def coords_grid(batch, ht, wd):
-    coords = torch.meshgrid(torch.arange(ht), torch.arange(wd))
-    coords = torch.stack(coords[::-1], dim=0).float()
-    return coords[None].repeat(batch, 1, 1, 1)
+    # arange函数生成一个0~ht-1的张量； meshgrid生成了二维网格坐标
+    # torch.arange(ht) = [0 ~ ht-1]
+    # torch.arange(wd) = [0 ~ wd-1]
+    # 将两个张量进行组合，生成一个二维网格坐标
+    # ht = 3 wd = 4
+    # y = [0,1,2] x = [0,1,2,3]
+    # Y =
+    # [[0,0,0,0],
+    #  [1,1,1,1],
+    #  [2,2,2,2]]
+
+    # X =
+    # [[0,1,2,3],
+    #  [0,1,2,3],
+    #  [0,1,2,3]]
+    coords = torch.meshgrid(torch.arange(ht), torch.arange(wd)) # 返回的默认顺序是(Y, X)
+    coords = torch.stack(coords[::-1], dim=0).float() # 进行顺序的翻转，改成（X, Y）
+    return coords[None].repeat(batch, 1, 1, 1) # 在第0维增加一个维度 ，然后在不改变后面维度的情况下，对第零维重复复制batch次
 
