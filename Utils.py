@@ -19,8 +19,7 @@ import numpy as np
 code_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(code_dir)
 
-
-
+# 设定log形式
 def set_logging_format(level=logging.INFO):
   importlib.reload(logging)
   FORMAT = '%(message)s'
@@ -29,7 +28,7 @@ def set_logging_format(level=logging.INFO):
 set_logging_format()
 
 
-
+# 设置随机种子
 def set_seed(random_seed):
   import torch,random
   np.random.seed(random_seed)
@@ -39,7 +38,7 @@ def set_seed(random_seed):
   torch.backends.cudnn.deterministic = True
   torch.backends.cudnn.benchmark = False
 
-
+# 将点云数据转换为Open3d的点云对象
 def toOpen3dCloud(points,colors=None,normals=None):
   cloud = o3d.geometry.PointCloud()
   cloud.points = o3d.utility.Vector3dVector(points.astype(np.float64))
@@ -52,7 +51,7 @@ def toOpen3dCloud(points,colors=None,normals=None):
   return cloud
 
 
-
+# 它做的是“把 2D 深度图反投影到相机坐标系 3D 空间”。
 def depth2xyzmap(depth:np.ndarray, K, uvs:np.ndarray=None, zmin=0.1):
   invalid_mask = (depth<zmin)
   H,W = depth.shape[:2]
@@ -74,8 +73,7 @@ def depth2xyzmap(depth:np.ndarray, K, uvs:np.ndarray=None, zmin=0.1):
     xyz_map[invalid_mask] = 0
   return xyz_map
 
-
-
+# 冻结模型参数
 def freeze_model(model):
   model = model.eval()
   for p in model.parameters():
@@ -85,7 +83,10 @@ def freeze_model(model):
   return model
 
 
-
+# 给定原图高宽 H, W，返回一个新的 H_resize, W_resize，同时满足：
+# 尽量保持原始长宽比例（aspect ratio）
+# 高宽都对齐到 divider 的倍数（默认 16）
+# 不超过 max_H 和 max_W
 def get_resize_keep_aspect_ratio(H, W, divider=16, max_H=1232, max_W=1232):
   assert max_H%divider==0
   assert max_W%divider==0
@@ -104,7 +105,7 @@ def get_resize_keep_aspect_ratio(H, W, divider=16, max_H=1232, max_W=1232):
       W_resize = max_W
   return int(H_resize), int(W_resize)
 
-
+# 视差图可视化工具
 def vis_disparity(disp, min_val=None, max_val=None, invalid_thres=np.inf, color_map=cv2.COLORMAP_TURBO, cmap=None, other_output={}):
   """
   @disp: np array (H,W)

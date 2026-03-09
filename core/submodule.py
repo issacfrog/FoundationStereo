@@ -14,14 +14,14 @@ import numpy as np
 code_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(f'{code_dir}/../')
 
-
+# 表征是否是连续存储
 def _is_contiguous(tensor: torch.Tensor) -> bool:
-    if torch.jit.is_scripting():
+    if torch.jit.is_scripting(): # 检查当前代码是否正在被TorchScript 编译器处理
         return tensor.is_contiguous()
     else:
         return tensor.is_contiguous(memory_format=torch.contiguous_format)
 
-
+# 2D LayerNorm
 class LayerNorm2d(nn.LayerNorm):
     r""" https://huggingface.co/spaces/Roll20/pet_score/blob/b258ef28152ab0d5b377d9142a23346f863c1526/lib/timm/models/convnext.py#L85
     LayerNorm for channels_first tensors with 2d spatial dimensions (ie N, C, H, W).
@@ -37,13 +37,14 @@ class LayerNorm2d(nn.LayerNorm):
         if _is_contiguous(x):
             return F.layer_norm(x.permute(0, 2, 3, 1), self.normalized_shape, self.weight, self.bias, self.eps).permute(0, 3, 1, 2).contiguous()
         else:
+            # 求norm的公式
             s, u = torch.var_mean(x, dim=1, keepdim=True)
             x = (x - u) * torch.rsqrt(s + self.eps)
             x = x * self.weight[:, None, None] + self.bias[:, None, None]
             return x
 
 
-
+# 统一封装 2D/3D 卷积（或反卷积） + 可选归一化 + 可选激活
 class BasicConv(nn.Module):
 
     def __init__(self, in_channels, out_channels, deconv=False, is_3d=False, bn=True, relu=True, norm='batch', **kwargs):
@@ -81,7 +82,8 @@ class BasicConv(nn.Module):
             x = nn.LeakyReLU()(x)#, inplace=True)
         return x
 
-
+# 把一次完整 "3D 卷积"拆成两步 ，降低计算复杂度
+# 分成全量卷积还是只在视差维度上面做卷积
 class Conv3dNormActReduced(nn.Module):
     def __init__(self, C_in, C_out, hidden=None, kernel_size=3, kernel_disp=None, stride=1, norm=nn.BatchNorm3d):
         super().__init__()
@@ -94,6 +96,7 @@ class Conv3dNormActReduced(nn.Module):
             norm(hidden),
             nn.ReLU(),
         )
+        # 这是只在视差维度上面做卷积
         self.conv2 = nn.Sequential(
             nn.Conv3d(hidden, C_out, kernel_size=(kernel_disp, 1, 1), padding=(kernel_disp//2, 0, 0), stride=(stride, 1, 1)),
             norm(C_out),
@@ -111,7 +114,8 @@ class Conv3dNormActReduced(nn.Module):
 
 
 
-
+# **作用**：2D/3D 残差块。  
+# 公式直觉：`out = ReLU(F(x) + shortcut(x))`
 class ResnetBasicBlock(nn.Module):
   def __init__(self, inplanes, planes, kernel_size=3, stride=1, padding=1, downsample=None, groups=1, base_width=64, dilation=1, norm_layer=nn.BatchNorm2d, bias=False):
     super().__init__()
@@ -151,7 +155,7 @@ class ResnetBasicBlock(nn.Module):
 
     return out
 
-
+# 与ResnetBasicBlock类似
 class ResnetBasicBlock3D(nn.Module):
   def __init__(self, inplanes, planes, kernel_size=3, stride=1, padding=1, downsample=None, groups=1, base_width=64, dilation=1, norm_layer=nn.BatchNorm3d, bias=False):
     super().__init__()
@@ -190,15 +194,16 @@ class ResnetBasicBlock3D(nn.Module):
 
     return out
 
-
+# 多头注意力
 class FlashMultiheadAttention(nn.Module):
     def __init__(self, embed_dim, num_heads):
         super().__init__()
-        self.num_heads = num_heads
-        self.embed_dim = embed_dim
-        self.head_dim = embed_dim // num_heads
+        self.num_heads = num_heads              # 头的数量
+        self.embed_dim = embed_dim              # 输入输出特征总维度
+        self.head_dim = embed_dim // num_heads  # 头的维度
         assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
 
+        # 线性投影矩阵，实际上是要学习的参数
         self.q_proj = nn.Linear(embed_dim, embed_dim)
         self.k_proj = nn.Linear(embed_dim, embed_dim)
         self.v_proj = nn.Linear(embed_dim, embed_dim)
@@ -209,20 +214,23 @@ class FlashMultiheadAttention(nn.Module):
         @query: (B,L,C)
         """
         B,L,C = query.shape
+        # 投影之后的结果
         Q = self.q_proj(query)
         K = self.k_proj(key)
         V = self.v_proj(value)
 
+        # 张量重排，以符合各个头自己进行隔离的目的
         Q = Q.view(Q.size(0), Q.size(1), self.num_heads, self.head_dim)
         K = K.view(K.size(0), K.size(1), self.num_heads, self.head_dim)
         V = V.view(V.size(0), V.size(1), self.num_heads, self.head_dim)
 
-        attn_output = F.scaled_dot_product_attention(Q, K, V)
+        attn_output = F.scaled_dot_product_attention(Q, K, V) # 注意力计算  Q,K,V 都是 (B,L,num_heads,head_dim)   
 
-        attn_output = attn_output.reshape(B,L,-1)
-        output = self.out_proj(attn_output)
+        
+        attn_output = attn_output.reshape(B,L,-1)           
+        output = self.out_proj(attn_output) # 全连接输出
 
-        return output
+        return output 
 
 
 
@@ -241,19 +249,20 @@ class FlashAttentionTransformerEncoderLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
+    # 注意这里的dropout是训练时候使用的，推理模式下会关闭
     def forward(self, src, src_mask=None, window_size=(-1, -1)):
-        src2 = self.self_attn(src, src, src, src_mask, window_size=window_size)
-        src = src + self.dropout1(src2)
-        src = self.norm1(src)
+        src2 = self.self_attn(src, src, src, src_mask, window_size=window_size) # 自注意力层
+        src = src + self.dropout1(src2)                                         # 第一条残差链接
+        src = self.norm1(src)                                                   # 第一层归一化
 
-        src2 = self.linear2(self.dropout(self.act(self.linear1(src))))
-        src = src + self.dropout2(src2)
+        src2 = self.linear2(self.dropout(self.act(self.linear1(src))))          # 前馈FFN层
+        src = src + self.dropout2(src2)                                         # 第二条残差链接 
         src = self.norm2(src)
 
         return src
 
 
-
+# 上采样插值
 class UpsampleConv(nn.Module):
     def __init__(self, C_in, C_out, is_3d=False, kernel_size=3, bias=True, stride=1, padding=1):
         super().__init__()
@@ -273,7 +282,7 @@ class UpsampleConv(nn.Module):
         return x
 
 
-
+# Unet风格的上采样
 class Conv2x(nn.Module):
 
     def __init__(self, in_channels, out_channels, deconv=False, is_3d=False, concat=True, keep_concat=True, bn=True, relu=True, keep_dispc=False):
@@ -312,7 +321,7 @@ class Conv2x(nn.Module):
         x = self.conv2(x)
         return x
 
-
+# 使用InstanceNorm的卷积
 class BasicConv_IN(nn.Module):
 
     def __init__(self, in_channels, out_channels, deconv=False, is_3d=False, IN=True, relu=True, **kwargs):
@@ -341,7 +350,7 @@ class BasicConv_IN(nn.Module):
             x = nn.LeakyReLU()(x)#, inplace=True)
         return x
 
-
+# 使用InstanceNorm的Unet风格上采样
 class Conv2x_IN(nn.Module):
 
     def __init__(self, in_channels, out_channels, deconv=False, is_3d=False, concat=True, keep_concat=True, IN=True, relu=True, keep_dispc=False):
@@ -380,7 +389,7 @@ class Conv2x_IN(nn.Module):
         x = self.conv2(x)
         return x
 
-
+# 通道分组之间的相关性计算
 def groupwise_correlation(fea1, fea2, num_groups):
     B, C, H, W = fea1.shape
     assert C % num_groups == 0, f"C:{C}, num_groups:{num_groups}"
@@ -392,6 +401,7 @@ def groupwise_correlation(fea1, fea2, num_groups):
     assert cost.shape == (B, num_groups, H, W)
     return cost
 
+# 构建GWC代价体
 def build_gwc_volume(refimg_fea, targetimg_fea, maxdisp, num_groups, stride=1):
     """
     @refimg_fea: left image feature
@@ -408,7 +418,7 @@ def build_gwc_volume(refimg_fea, targetimg_fea, maxdisp, num_groups, stride=1):
     return volume
 
 
-
+# 构建拼接型代价体
 def build_concat_volume(refimg_fea, targetimg_fea, maxdisp):
     B, C, H, W = refimg_fea.shape
     volume = refimg_fea.new_zeros([B, 2 * C, maxdisp, H, W])
@@ -423,14 +433,16 @@ def build_concat_volume(refimg_fea, targetimg_fea, maxdisp):
     return volume
 
 
-
+# d代表视差 P(d) 对应视差为d的概率
+# d*P(d) 对应计算的是期望
 def disparity_regression(x, maxdisp):
     assert len(x.shape) == 4
     disp_values = torch.arange(0, maxdisp, dtype=x.dtype, device=x.device)
     disp_values = disp_values.reshape(1, maxdisp, 1, 1)
     return torch.sum(x * disp_values, 1, keepdim=True)
 
-
+# 使用2D特征去调制3D代价体
+# 利用原始图像的 2D 特征（Context）来“过滤”或“增强” 3D 代价体积（Cost Volume）中的信息。
 class FeatureAtt(nn.Module):
     def __init__(self, cv_chan, feat_chan):
         super(FeatureAtt, self).__init__()
@@ -446,9 +458,15 @@ class FeatureAtt(nn.Module):
         @feat: (B,C,H,W)
         '''
         feat_att = self.feat_att(feat).unsqueeze(2)   #(B,C,1,H,W)
-        cv = torch.sigmoid(feat_att)*cv
+        # 输入 feat: (B, feat_chan, H, W)
+        # 输出 feat_att: (B, cv_chan, H, W) 
+        # 这里通过两个卷积层，将 2D 图像特征的通道数转换到与代价体积（Cost Volume）的通道数 $C$ 一致。
+        # 这相当于在学习一种“注意力图”，决定每一个通道在不同空间位置的重要性。
+        # 而后执行对齐
+        cv = torch.sigmoid(feat_att)*cv # 对输出进行加权
         return cv
 
+# 凸组合上采样
 def context_upsample(disp_low, up_weights):
     """
     @disp_low: (b,1,h,w)  1/4 resolution
@@ -464,7 +482,7 @@ def context_upsample(disp_low, up_weights):
     return disp
 
 
-
+# 位置编码
 class PositionalEmbedding(nn.Module):
   def __init__(self, d_model, max_len=512):
     super().__init__()
@@ -498,33 +516,47 @@ class PositionalEmbedding(nn.Module):
     return x + pe[:, :x.size(1)]
 
 
-
+# 对 cost volume 的 disparity 维做 Transformer 注意力
 class CostVolumeDisparityAttention(nn.Module):
-  def __init__(self, d_model, nhead, dim_feedforward, dropout=0.1, act=nn.GELU, norm_first=False, num_transformer=6, max_len=512, resize_embed=False):
-    super().__init__()
-    self.resize_embed = resize_embed
-    self.sa = nn.ModuleList([])
-    for _ in range(num_transformer):
-      self.sa.append(FlashAttentionTransformerEncoderLayer(embed_dim=d_model, num_heads=nhead, dim_feedforward=dim_feedforward, act=act, dropout=dropout))
-    self.pos_embed0 = PositionalEmbedding(d_model, max_len=max_len)
+    def __init__(self, d_model, nhead, dim_feedforward, dropout=0.1, act=nn.GELU, norm_first=False, num_transformer=6, max_len=512, resize_embed=False):
+        super().__init__()
+        self.resize_embed = resize_embed
+        self.sa = nn.ModuleList([])
+        for _ in range(num_transformer):
+        self.sa.append(FlashAttentionTransformerEncoderLayer(embed_dim=d_model, num_heads=nhead, dim_feedforward=dim_feedforward, act=act, dropout=dropout))
+        self.pos_embed0 = PositionalEmbedding(d_model, max_len=max_len)
+
+    # Cost Volume
+    # (B,C,D,H,W)
+    #       │
+    # reshape
+    #       │
+    # (BHW,D,C)
+    #       │
+    # Positional Embedding
+    #       │
+    # Transformer × 6
+    #       │
+    # reshape back
+    #       │
+    # (B,C,D,H,W)
+    def forward(self, cv, window_size=(-1,-1)):
+        """
+        @cv: (B,C,D,H,W) where D is max disparity
+        """
+        x = cv
+        B,C,D,H,W = x.shape
+        x = x.permute(0,3,4,2,1).reshape(B*H*W, D, C) # 将代价体变形为 (B*H*W, D, C)
+        # 加位置编码
+        x = self.pos_embed0(x, resize_embed=self.resize_embed)  #!NOTE No resize since disparity is pre-determined
+        for i in range(len(self.sa)):
+            x = self.sa[i](x, window_size=window_size) # Transformer encoder
+        x = x.reshape(B,H,W,D,C).permute(0,4,3,1,2) # reshape
+
+        return x
 
 
-  def forward(self, cv, window_size=(-1,-1)):
-    """
-    @cv: (B,C,D,H,W) where D is max disparity
-    """
-    x = cv
-    B,C,D,H,W = x.shape
-    x = x.permute(0,3,4,2,1).reshape(B*H*W, D, C)
-    x = self.pos_embed0(x, resize_embed=self.resize_embed)  #!NOTE No resize since disparity is pre-determined
-    for i in range(len(self.sa)):
-        x = self.sa[i](x, window_size=window_size)
-    x = x.reshape(B,H,W,D,C).permute(0,4,3,1,2)
-
-    return x
-
-
-
+# 通道增强
 class ChannelAttentionEnhancement(nn.Module):
     def __init__(self, in_planes, ratio=16):
         super(ChannelAttentionEnhancement, self).__init__()
@@ -542,6 +574,8 @@ class ChannelAttentionEnhancement(nn.Module):
         out = avg_out + max_out
         return self.sigmoid(out)
 
+# CBAM的空间注意力 CBAM 风格注意力（Channel + Spatial）
+# CBAM (Convolutional Block Attention Module) 论文中的 通道注意力模块 (Channel Attention Module)
 class SpatialAttentionExtractor(nn.Module):
     def __init__(self, kernel_size=7):
         super(SpatialAttentionExtractor, self).__init__()
@@ -567,7 +601,7 @@ class EdgeNextConvEncoder(nn.Module):
         else:
           self.norm = nn.Identity()
         self.pwconv1 = nn.Linear(dim, expan_ratio * dim)
-        self.act = nn.GELU()
+        self.act = nn.GELU() # 使用 GELU 激活函数，这比 ReLU 更平滑，是目前高性能视觉模型的标配
         self.pwconv2 = nn.Linear(expan_ratio * dim, dim)
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True) if layer_scale_init_value > 0 else None
 
