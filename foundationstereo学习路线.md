@@ -50,13 +50,13 @@ isProject: false
 
 ## 两周分阶段路线
 
-### 第 1 阶段（第 1-2 天）：跑通与定位
+### 第 1 阶段（第 1-2 天）：跑通与定位 done
 
 - 按 [readme.md](/home/zhouchao/learn/nvidia/FoundationStereo/readme.md) 和 [environment.yml](/home/zhouchao/learn/nvidia/FoundationStereo/environment.yml) 完成环境。
 - 跑通 [scripts/run_demo.py](/home/zhouchao/learn/nvidia/FoundationStereo/scripts/run_demo.py)，产出 `vis.png`（可选 `cloud.ply`）。
 - 验收：你能解释清楚命令行参数 `left_file/right_file/ckpt_dir/out_dir/scale/get_pc` 的作用。
 
-### 第 2 阶段（第 3-5 天）：主推理链路吃透
+### 第 2 阶段（第 3-5 天）：主推理链路吃透 done
 
 - 从 [scripts/run_demo.py](/home/zhouchao/learn/nvidia/FoundationStereo/scripts/run_demo.py) 追到 [core/foundation_stereo.py](/home/zhouchao/learn/nvidia/FoundationStereo/core/foundation_stereo.py) 的 `forward`。
 - 重点理解 4 个点：
