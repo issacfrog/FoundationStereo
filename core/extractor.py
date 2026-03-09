@@ -17,8 +17,10 @@ from core.submodule import LayerNorm2d, BasicConv, Conv2x_IN
 from Utils import get_resize_keep_aspect_ratio, freeze_model
 import timm
 
-
+# 残差块
 class ResidualBlock(nn.Module):
+    # 初始化
+    # 输入是输入通道数, 输出通道数, 归一化类型, 步长
     def __init__(self, in_planes, planes, norm_fn='group', stride=1):
         super(ResidualBlock, self).__init__()
 
@@ -65,7 +67,7 @@ class ResidualBlock(nn.Module):
             self.downsample = nn.Sequential(
                 nn.Conv2d(in_planes, planes, kernel_size=1, stride=stride), self.norm3)
 
-
+    # 前向处理
     def forward(self, x):
         y = x
         y = self.conv1(y)
@@ -82,6 +84,7 @@ class ResidualBlock(nn.Module):
 
 
 
+# 多尺度CNN编码器 输出1/4、1/8、1/16 三个尺度特征
 class MultiBasicEncoder(nn.Module):
     def __init__(self, output_dim=[128], norm_fn='batch', dropout=0.0, downsample=3):
         super(MultiBasicEncoder, self).__init__()
@@ -114,7 +117,7 @@ class MultiBasicEncoder(nn.Module):
         self.layer5 = self._make_layer(128, stride=2)
 
         output_list = []
-
+        # 添加头
         for dim in output_dim:
             conv_out = nn.Sequential(
                 ResidualBlock(128, 128, self.norm_fn, stride=1),
@@ -161,8 +164,11 @@ class MultiBasicEncoder(nn.Module):
         self.in_planes = dim
         return nn.Sequential(*layers)
 
+    # 前向处理 
+    # dual_inp: 是否是左右图拼接输入
+    # num_layers: 返回几层输出，1/2/3
     def forward(self, x, dual_inp=False, num_layers=3):
-
+        # 基础pipe 同来完成特征提取
         x = self.conv1(x)
         x = self.norm1(x)
         x = self.relu1(x)
@@ -173,6 +179,8 @@ class MultiBasicEncoder(nn.Module):
             v = x
             x = x[:(x.shape[0]//2)]
 
+        # 不同尺度下返回不同的特征
+        # 实际的处理是，经过主干网络后，得到对应尺度的特征，接头得到最终特征
         outputs04 = [f(x) for f in self.outputs04]
         if num_layers == 1:
             return (outputs04, v) if dual_inp else (outputs04,)
@@ -189,7 +197,7 @@ class MultiBasicEncoder(nn.Module):
         return (outputs04, outputs08, outputs16, v) if dual_inp else (outputs04, outputs08, outputs16)
 
 
-
+# 更新模块提供上下文特征，并把vit_feat(来自depthanything) 与 1/4 尺度特征拼接
 class ContextNetDino(MultiBasicEncoder):
     def __init__(self, args, output_dim=[128], norm_fn='batch', downsample=3):
         nn.Module.__init__(self)
@@ -231,10 +239,12 @@ class ContextNetDino(MultiBasicEncoder):
           nn.Conv2d(128, 128, kernel_size=4, stride=4, padding=0),
           nn.BatchNorm2d(128),
         )
+        # 将depthanything结果与1/4 尺度特征拼接
         vit_dim = DepthAnythingFeature.model_configs[self.args.vit_size]['features']//2
         self.conv2 = BasicConv(128+vit_dim, 128, kernel_size=3, padding=1)
         self.norm = nn.BatchNorm2d(256)
 
+        # 给不同尺度特征添加头 
         output_list = []
         for dim in output_dim:
             conv_out = nn.Sequential(
@@ -270,6 +280,7 @@ class ContextNetDino(MultiBasicEncoder):
         x = self.layer3(x)
 
         divider = np.lcm(self.patch_size, 16)
+        # 对齐到divider？但是看起来现在没有实际的使用
         H_resize, W_resize = get_resize_keep_aspect_ratio(H,W, divider=divider, max_H=1344, max_W=1344)
         x = torch.cat([x, vit_feat], dim=1)
         x = self.conv2(x)
@@ -283,7 +294,7 @@ class ContextNetDino(MultiBasicEncoder):
 
         return (outputs04, outputs08, outputs16)
 
-
+# 调用depthanything计算出深度信息
 class DepthAnythingFeature(nn.Module):
     model_configs = {
         'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
@@ -311,32 +322,37 @@ class DepthAnythingFeature(nn.Module):
         @x: (B,C,H,W)
         """
         h, w = x.shape[-2:]
+        # 调用depthanything的pretrained模型，获取中间层特征
         features = self.depth_anything.pretrained.get_intermediate_layers(x, self.intermediate_layer_idx[self.encoder], return_class_token=True)
 
 
         patch_size = self.depth_anything.pretrained.patch_size
         patch_h, patch_w = h // patch_size, w // patch_size
+        # 调用depthanything的depth_head，获取深度信息
         out, path_1, path_2, path_3, path_4, disp = self.depth_anything.depth_head.forward(features, patch_h, patch_w, return_intermediate=True)
 
         return {'out':out, 'path_1':path_1, 'path_2':path_2, 'path_3':path_3, 'path_4':path_4, 'features':features, 'disp':disp}  # path_1 is 1/2; path_2 is 1/4
 
-
+# 这是主特征提取器：把 EdgeNeXt CNN 特征和 DepthAnything 语义特征融合，输出多尺度特征列表。
 class Feature(nn.Module):
     def __init__(self, args):
         super(Feature, self).__init__()
         self.args = args
         # [Modified by Assistant] Disable online pretrained download from Hugging Face.
         # We rely on the project checkpoint loaded in run_demo.py, so offline inference can run.
+        # timm 是一个现成模型库（很多 CNN/ViT 都有） 本质上是一键构建了这个网络
         model = timm.create_model('edgenext_small', pretrained=False, features_only=False)
         self.stem = model.stem
         self.stages = model.stages
         chans = [48, 96, 160, 304]
         self.chans = chans
+        # self.dino 调用DepthAnythingFeature，获取vit_feat 并且freeze权重
         self.dino = DepthAnythingFeature(encoder=self.args.vit_size)
         self.dino = freeze_model(self.dino)
         vit_feat_dim = DepthAnythingFeature.model_configs[self.args.vit_size]['features']//2
 
-        self.deconv32_16 = Conv2x_IN(chans[3], chans[2], deconv=True, concat=True)
+        # 用CNN backbone
+        self.deconv32_16 = Conv2x_IN(chans[3], chans[2], deconv=True, concat=True) # 2倍上采样，具体处理逻辑需要参考代码了
         self.deconv16_8 = Conv2x_IN(chans[2]*2, chans[1], deconv=True, concat=True)
         self.deconv8_4 = Conv2x_IN(chans[1]*2, chans[0], deconv=True, concat=True)
         self.conv4 = nn.Sequential(
@@ -350,15 +366,19 @@ class Feature(nn.Module):
 
     def forward(self, x):
         B,C,H,W = x.shape
+        # lcm进行对齐，放置尺寸不匹配导致的错误
+        # 本质是进行重采样，对于不同大小的图像，处理成相同大小的
         divider = np.lcm(self.patch_size, 16)
         H_resize, W_resize = get_resize_keep_aspect_ratio(H,W, divider=divider, max_H=1344, max_W=1344)
-        x_in_ = F.interpolate(x, size=(H_resize, W_resize), mode='bicubic', align_corners=False)
-        self.dino = self.dino.eval()
+        x_in_ = F.interpolate(x, size=(H_resize, W_resize), mode='bicubic', align_corners=False) # x_in_固定了尺寸
+
+        self.dino = self.dino.eval() # 设置为推理模式
         with torch.no_grad():
           output = self.dino(x_in_)
-        vit_feat = output['out']
-        vit_feat = F.interpolate(vit_feat, size=(H//4,W//4), mode='bilinear', align_corners=True)
-        x = self.stem(x)
+        vit_feat = output['out'] # 获取vit特征
+        vit_feat = F.interpolate(vit_feat, size=(H//4,W//4), mode='bilinear', align_corners=True) # 对齐特征尺度
+        x = self.stem(x) # 调用EdgeNeXt的stem，获取基础特征
+        # Unet下采样+skip connection，完成整体的数据恢复
         x4 = self.stages[0](x)
         x8 = self.stages[1](x4)
         x16 = self.stages[2](x8)
