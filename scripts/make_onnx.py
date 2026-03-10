@@ -18,7 +18,7 @@ class FoundationStereoOnnx(FoundationStereo):
         return disp
 
 
-
+# 将pth转onnx
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--save_path', type=str, default=f'{code_dir}/../output/foundation_stereo.onnx', help='Path to save results.')

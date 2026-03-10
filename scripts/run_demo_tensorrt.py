@@ -30,6 +30,7 @@ from Utils import vis_disparity, depth2xyzmap, toOpen3dCloud, set_seed
 from core.foundation_stereo import FoundationStereo
 from core.utils.utils import InputPadder
 
+# 读图转tensor
 def preprocess(image_path, args):
     input_image = imageio.imread(image_path)
     if args.height and args.width:
@@ -38,6 +39,7 @@ def preprocess(image_path, args):
     return resized_image, input_image
 
 
+# 创建onnx runtime session
 def get_onnx_model(args):
     session_options = ort.SessionOptions()
     session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -45,6 +47,7 @@ def get_onnx_model(args):
     return model
 
 
+# 创建tensorrt engine session
 def get_engine_model(args):
     with open(args.pretrained, 'rb') as file:
         engine_data = file.read()
@@ -74,6 +77,7 @@ def inference(left_img_path: str, right_img_path: str, model, args: argparse.Nam
     vis = np.concatenate([input_left, vis], axis=1)
     imageio.imwrite(os.path.join(args.save_path, 'visual', left_img_path.split('/')[-1]), vis)
 
+    # 如果保存点云
     if args.pc:
         save_path = left_img_path.split('/')[-1].split('.')[0] + '.ply'
         baseline = 193.001/1e3
@@ -121,6 +125,7 @@ def main():
     assert os.path.isfile(args.pretrained), f'Pretrained model {args.pretrained} not found'
     logging.info('Pretrained model loaded from %s', args.pretrained)
     set_seed(0)
+    # 使用onnx或者tensorrt engine进行推理
     if args.pretrained.endswith('.onnx'):
         model = get_onnx_model(args)
     elif args.pretrained.endswith('.engine') or args.pretrained.endswith('.plan'):

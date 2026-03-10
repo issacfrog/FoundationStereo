@@ -38,6 +38,7 @@ def set_seed(random_seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+# Cu SFM 数据接口
 class CuSFMDataInference:
     def __init__(self, args):
         self.args = args
@@ -47,6 +48,7 @@ class CuSFMDataInference:
         self.load_metadata()
         self.load_model()
 
+    # 数据加载
     def load_metadata(self):
         with open(self.args.metadata_file, 'r') as f:
             camera_meta = json.load(f)
@@ -65,6 +67,7 @@ class CuSFMDataInference:
                 self.camera_keyframes[keyframe['camera_params_id']] = {}
             self.camera_keyframes[keyframe['camera_params_id']][keyframe['synced_sample_id']] = keyframe
 
+    # 模型加载
     def load_model(self):
         cfg = OmegaConf.load(f'{os.path.dirname(self.args.ckpt_dir)}/cfg.yaml')
         # Set default vit_size if not present in config
@@ -137,17 +140,22 @@ class CuSFMDataInference:
         pcd.colors = o3d.utility.Vector3dVector(rgb / 255.0)
         return pcd
 
+    # 相机处理pipe
     def process_camera(self, left_param_id: str):
+        # 1. 解析相机参数
         camera_params = self.get_camera_params(left_param_id)
         camera = camera_params['sensor_meta_data']['sensor_name']
         print('Processing camera_param_id: ', left_param_id, 'sensor_name: ', camera)
 
+        # 2. 创建点云输出目录
         if self.args.get_pc:
             os.makedirs(f'{self.args.out_dir}/pcd/{camera}', exist_ok=True)
 
+        # 3. 取相机内参
         K = self.get_projection_matrix(camera_params)[:3, :3]
         print("Camera matrix for camera: ", camera, " is \n", K)
 
+        # 4. 计算基线 这是根据内外参计算的
         baseline = 0
         right_param_id = None
         for stereo_pair in self.stereo_pairs:
@@ -162,6 +170,8 @@ class CuSFMDataInference:
         if baseline == 0:
             baseline = self.compute_baseline(left_param_id, right_param_id)
 
+        # 5. 获取左右相机关键帧
+        # learning base可能使用多个历史帧进行处理？
         left_camera_keyframes = self.camera_keyframes[left_param_id]
         right_camera_keyframes = self.camera_keyframes[right_param_id]
 
@@ -172,6 +182,7 @@ class CuSFMDataInference:
             logging.info(f"No keyframes found for right camera of {camera}")
             return
 
+        # 筛选出相同synced_sample_id的帧
         create_dir = True
         for synced_sample_id, left_keyframe in tqdm(
                 left_camera_keyframes.items(),
@@ -224,6 +235,7 @@ class CuSFMDataInference:
                     f"Image not found for {left_file} or {right_file}")
                 continue
 
+            # 6. 读取左右图像 本质上是一种数据的预处理
             img0 = imageio.imread(left_file)
             img1 = imageio.imread(right_file)
             H_big, W_big = img0.shape[:2]
@@ -244,6 +256,8 @@ class CuSFMDataInference:
             img0_tensor = img0_tensor.contiguous()
             img1_tensor = img1_tensor.contiguous()
 
+            # 进行模型推理，如果也要对右相机进行处理
+            # 实际处理的时候将左右向量翻转后推给模型进行推理
             with torch.cuda.amp.autocast(True):
                 disp = self.model.forward(
                     img0_tensor,
@@ -263,10 +277,13 @@ class CuSFMDataInference:
                     disp2 = torch.flip(disp2, dims=[3])
                     disp2 = padder.unpad(disp2.float())
 
+            # 7. 将视差图转换为深度图
             disp = disp.data.cpu().numpy().reshape(H, W)
             disp_big = cv2.resize(
                 disp, (W_big, H_big), interpolation=cv2.INTER_NEAREST)
 
+
+            # 8. 单位转换
             # Convert disparity to depth in (mm)
             doffs = 0
             depth = 1000 * scale * K[0, 0] * baseline / (disp + doffs)
@@ -275,6 +292,7 @@ class CuSFMDataInference:
             depth[depth > 65535] = 0
             depth_big[depth_big > 65535] = 0
 
+            # 处理后的结果放到文件夹中
             imageio.imwrite(
                 self.get_output_image_file(
                     f'{self.args.out_dir}/scaled_0_4',
@@ -324,6 +342,8 @@ class CuSFMDataInference:
 def is_left_camera(camera_name: str):
     return camera_name.endswith("_left") or camera_name.endswith("left_rgb")
 
+# 本质上是在做一个双目深度估计的问题
+# 输出视差图或者深度图
 def main(rank, world_size, args):
     args.rank = rank
     set_seed(0)
